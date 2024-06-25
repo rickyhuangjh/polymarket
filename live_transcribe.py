@@ -1,45 +1,55 @@
-import sounddevice as sd
-import queue
-import sys
-from google.cloud import speech
+import whisper
+import torch
+import pyaudio
+import numpy as np
 
-# Audio recording parameters
-RATE = 16000
+# Load the Whisper model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(device)
+model = whisper.load_model("medium", device=device)
+
+
+# Initialize PyAudio
+p = pyaudio.PyAudio()
+
+# Audio stream parameters
+FORMAT = pyaudio.paInt16
 CHANNELS = 1
+RATE = 16000
+CHUNK = 1024
+BUFFER_SIZE = 20  # Number of chunks to collect before transcribing
 
-q = queue.Queue()
+# Open audio stream
+stream = p.open(format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                frames_per_buffer=CHUNK)
 
-def callback(indata, frames, time, status):
-    """This is called (from a separate thread) for each audio block."""
-    if status:
-        print(status, file=sys.stderr)
-    q.put(bytes(indata))
+print("Recording... Press Ctrl+C to stop.")
 
-def transcribe_stream():
-    client = speech.SpeechClient()
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=RATE,
-        language_code="en-US",
-    )
-    streaming_config = speech.StreamingRecognitionConfig(
-        config=config,
-        interim_results=True,
-    )
+audio_buffer = []
 
-    with sd.InputStream(samplerate=RATE, channels=CHANNELS, callback=callback):
-        audio_generator = (
-            speech.StreamingRecognizeRequest(audio_content=content)
-            for content in iter(q.get, None)
-        )
+try:
+    while True:
+        # Read audio data from the microphone
+        audio_data = stream.read(CHUNK)
+        audio_buffer.append(np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0)
 
-        requests = iter(audio_generator)
+        if len(audio_buffer) >= BUFFER_SIZE:
+            # Concatenate buffer into a single audio array
+            audio_input = np.concatenate(audio_buffer)
+            audio_buffer = []
 
-        responses = client.streaming_recognize(streaming_config, requests)
+            # Transcribe audio data using Whisper
+            result = model.transcribe(audio_input)
+            print(result["text"])
 
-        for response in responses:
-            for result in response.results:
-                print("Transcript: {}".format(result.alternatives[0].transcript))
+except KeyboardInterrupt:
+    print("Recording stopped.")
 
-if __name__ == "__main__":
-    transcribe_stream()
+finally:
+    # Stop and close the audio stream
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
