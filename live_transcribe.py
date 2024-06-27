@@ -6,36 +6,29 @@ import wave
 import os
 import time
 from datetime import datetime
-from ping import ping
+from utils import ping
 import whisper
 import asyncio
 from collections import deque
 import sounddevice as sd
 import soundfile as sf
-import torchaudio
-from speechbrain.inference.speaker import SpeakerRecognition
+from PIL import Image
+import pyautogui
+from facenet_pytorch import InceptionResnetV1, MTCNN
 
 load_dotenv()
 
 client = OpenAI()
 
-
-
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 whisper_model = whisper.load_model('large')
 
+facenet_mode = InceptionResnetV1(pretrained='vggface2').eval()
 
+SIZE = 1000
+mtcnn = MTCNN(image_size=SIZE, margin=0)
 
-BIDEN_PATH = 'biden.wav'
-waveform, original_sample_rate = torchaudio.load(BIDEN_PATH)
-
-new_sample_rate = 16000
-transform = torchaudio.transforms.Resample(orig_freq=original_sample_rate, new_freq=new_sample_rate)
-resampled_waveform = transform(waveform)
-
-# Save the resampled audio (optional)
-torchaudio.save("biden.wav", resampled_waveform, new_sample_rate)
 
 USE_LOCAL_MODEL = True
     
@@ -54,41 +47,76 @@ buffer = np.zeros(buffer_size, dtype=np.float32)
 
 last_saved = 0
 
+
+REGION = (0, 0, SIZE, SIZE)
+def take_screenshot():
+    # Generate a timestamp for the filename
+    # Take a screenshot
+    screenshot = pyautogui.screenshot(region=REGION)
+    # Save the screenshot
+    screenshot.save(f"test.jpg", 'JPEG')
+
+def get_face_embedding(image_path):
+    # Load an image
+    img = Image.open(image_path)
+    
+    # Detect face and get cropped and aligned image
+    face = mtcnn(img)
+    
+    # If a face is detected, compute the embedding
+    if face is not None:
+        # Add a batch dimension
+        face = face.unsqueeze(0)
+        
+        # Get the face embedding
+        embedding = model(face)
+        return embedding
+    else:
+        print("No face detected")
+        return None
+
+def cosine_similarity(embedding1, embedding2):
+    return (embedding1 @ embedding2.T).item()
+
+# Example usage
+
+
 async def save_buffer_to_file():
     global buffer
     global last_saved
     prev_time = time.time()
 
-    cur_filename = '0.wav'
+    cur_filepath = '0.wav'
     
-    with sf.SoundFile(cur_filename, mode='w', samplerate=SAMPLE_RATE, channels=1, format='WAV') as file:
+    embedding1 = get_face_embedding('biden.jpg')
+    
+    with sf.SoundFile(cur_filepath, mode='w', samplerate=SAMPLE_RATE, channels=1, format='WAV') as file:
         while True:
             # Save the buffer to a file
-            #cur_filename = f'{last_saved}.wav'
+            #cur_filepath = f'{last_saved}.wav'
             file.write(buffer)
             last_saved = (last_saved + 1) % 8
 
-            print(len(buffer))
+
+            take_screenshot()
 
 
-            verification = SpeakerRecognition.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={'device': 'cuda'})
+            embedding2 = get_face_embedding('test.jpg')
 
-            score, prediction = verification.verify_files(cur_filename, BIDEN_PATH)
+            if embedding1 is not None and embedding2 is not None:
+                similarity = cosine_similarity(embedding1, embedding2)
+                print(f"Cosine similarity: {similarity}")
 
-            print(score, 'BIDEN' if prediction == 1 else 'NOT BIDEN')
-            
+            # print(similarity, 'BIDEN' if prediction == 1 else 'NOT BIDEN')
             
             
             start_time = time.time()
-            transcription = transcribe_audio(buffer)
+            # transcription = transcribe_audio(buffer)
             # ping()
             end_time = time.time()
             cur_time = time.time()
             # print(f'time: {end_time-start_time:.2f}')
-            print(f'{datetime.now().strftime('%M:%S')} {cur_time-prev_time:.2f}s', transcription)
+            # print(f'{datetime.now().strftime('%M:%S')} {cur_time-prev_time:.2f}s', transcription)
             prev_time = cur_time
 
 def audio_callback(indata, frames, timex, status):
